@@ -45,13 +45,16 @@ func TestPopulateDefaultAgentConfig(t *testing.T) {
 	assert.True(t, strings.HasSuffix(agentConfig.EnvoyConfigPath, ".yaml"))
 	assert.Empty(t, agentConfig.ClusterIPMapping)
 	assert.False(t, agentConfig.EnvoyUseHttpClientToFetchAwsCredentials)
+	assert.Equal(t, uint32(HTTP2_MIN_WINDOW_SIZE_DEFAULT), agentConfig.Http2MinWindowSize)
 }
 
 func TestPopulateAgentConfigWithEnvVars(t *testing.T) {
 	os.Setenv("APPNET_AGENT_HTTP_PORT", "8888")
 	os.Setenv("APPNET_AGENT_HTTP_BIND_ADDRESS", "127.0.0.2")
+	os.Setenv("ENVOY_HTTP2_MIN_WINDOW_SIZE", "131072")
 	defer os.Unsetenv("APPNET_AGENT_HTTP_PORT")
 	defer os.Unsetenv("APPNET_AGENT_HTTP_BIND_ADDRESS")
+	defer os.Unsetenv("ENVOY_HTTP2_MIN_WINDOW_SIZE")
 
 	var agentConfig AgentConfig
 
@@ -60,6 +63,7 @@ func TestPopulateAgentConfigWithEnvVars(t *testing.T) {
 	assert.NotNil(t, agentConfig)
 	assert.Equal(t, 8888, agentConfig.AgentHttpPort)
 	assert.Equal(t, "127.0.0.2", agentConfig.AgentHttpAddress)
+	assert.Equal(t, uint32(131072), agentConfig.Http2MinWindowSize)
 }
 
 func TestOffLogLevel(t *testing.T) {
@@ -331,4 +335,39 @@ func TestSkipDeprecatedLogsInvalidValue(t *testing.T) {
 	var agentConfig AgentConfig
 	agentConfig.SetDefaults()
 	assert.True(t, agentConfig.SkipDeprecatedLogs) // Should fall back to default (true)
+}
+
+func TestClampHttp2MinWindowSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		minWindow   int
+		expectedMin uint32
+	}{
+		{
+			name:        "default value passes through unchanged",
+			minWindow:   HTTP2_MIN_WINDOW_SIZE_DEFAULT,
+			expectedMin: HTTP2_MIN_WINDOW_SIZE_DEFAULT,
+		},
+		{
+			name:        "zero clamped to floor",
+			minWindow:   0,
+			expectedMin: HTTP2_MIN_WINDOW_SIZE_DEFAULT,
+		},
+		{
+			name:        "negative clamped to floor",
+			minWindow:   -100,
+			expectedMin: HTTP2_MIN_WINDOW_SIZE_DEFAULT,
+		},
+		{
+			name:        "value above floor honored",
+			minWindow:   131072,
+			expectedMin: 131072,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expectedMin, clampHttp2MinWindowSize(tt.minWindow))
+		})
+	}
 }

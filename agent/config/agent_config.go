@@ -121,6 +121,15 @@ const (
 
 	AGENT_LOGGING_RESET_TIMEOUT_S_DEFAULT = 300
 
+	// HTTP/2 window-size minimum guardrail. Defaults to 1 to reject only the
+	// literal zero-window attack class (CVE-2026-49975); raise via
+	// ENVOY_HTTP2_MIN_WINDOW_SIZE to tighten (e.g., to 65535 — the RFC 9113
+	// §6.5.2 default — per Envoy edge best practices,
+	// https://www.envoyproxy.io/docs/envoy/latest/configuration/best_practices/edge).
+	// Actual stream/connection window sizes are set by Bifrost/Transformer in
+	// the listener configs pushed via XDS.
+	HTTP2_MIN_WINDOW_SIZE_DEFAULT = 1
+
 	// Rate limiter constants
 	TPS_LIMIT       = 10
 	BURST_TPS_LIMIT = 20
@@ -177,6 +186,11 @@ type AgentConfig struct {
 
 	// Libcurl deprecation Envoy reloadable feature flag
 	EnvoyUseHttpClientToFetchAwsCredentials bool
+
+	// HTTP/2 window-size minimum guardrail. Clamped to the HTTP/2 protocol floor
+	// at startup. Bifrost/Transformer are responsible for honoring this floor in
+	// the listener configs they generate.
+	Http2MinWindowSize uint32
 
 	// Poll intervals
 	PidPollInterval       time.Duration
@@ -327,6 +341,28 @@ func getHcPollInterval() time.Duration {
 	return time.Duration(HC_POLL_INTERVAL_MS_DEFAULT) * time.Millisecond
 }
 
+// mergeHttp2MinWindowSizeEnvSetting reads ENVOY_HTTP2_MIN_WINDOW_SIZE, clamps
+// zero/negative values to the default (1), and stores it on config. Bifrost
+// and Transformer are responsible for setting the actual stream and connection
+// window sizes on listener configs they push via XDS — this floor guards the
+// agent's declared minimum against being weakened to zero.
+func mergeHttp2MinWindowSizeEnvSetting(config *AgentConfig) {
+	minWindow := getEnvValueAsInt("ENVOY_HTTP2_MIN_WINDOW_SIZE", HTTP2_MIN_WINDOW_SIZE_DEFAULT)
+	config.Http2MinWindowSize = clampHttp2MinWindowSize(minWindow)
+}
+
+// clampHttp2MinWindowSize ensures the configured floor is at least 1. Values
+// at or below zero are clamped to the default with a warning so a
+// misconfigured env var cannot disable the zero-window guardrail.
+func clampHttp2MinWindowSize(minWindow int) uint32 {
+	if minWindow < HTTP2_MIN_WINDOW_SIZE_DEFAULT {
+		log.Warnf("ENVOY_HTTP2_MIN_WINDOW_SIZE [%d] is below the minimum allowed value, clamping to [%d]",
+			minWindow, HTTP2_MIN_WINDOW_SIZE_DEFAULT)
+		return HTTP2_MIN_WINDOW_SIZE_DEFAULT
+	}
+	return uint32(minWindow)
+}
+
 func validateTimers(config *AgentConfig) {
 	if config.EnvoyRestartCount < 0 {
 		config.EnvoyRestartCount = ENVOY_RESTART_COUNT_DEFAULT
@@ -467,6 +503,8 @@ func (config *AgentConfig) SetDefaults() {
 
 	// Libcurl deprecation Envoy reloadable feature flag
 	config.EnvoyUseHttpClientToFetchAwsCredentials = getEnvValueAsBool("ENVOY_USE_HTTP_CLIENT_TO_FETCH_AWS_CREDENTIALS", ENVOY_USE_HTTP_CLIENT_TO_FETCH_AWS_CREDENTIALS_DEFAULT)
+
+	mergeHttp2MinWindowSizeEnvSetting(config)
 
 	config.AgentAdminMode = getAdminModeFromEnv("APPNET_AGENT_ADMIN_MODE", AGENT_ADMIN_MODE_DEFAULT)
 	if config.AgentAdminMode == UDS {
